@@ -5,6 +5,11 @@ import json
 import os
 import re
 import urllib
+from StringIO import StringIO
+import HTMLParser
+
+#from html2rest import html2rest
+from creole import html2rest
 
 from webscraping import common, download, xpath
 
@@ -16,7 +21,7 @@ DOMAIN = 'http://acr.dijon.over-blog.com/'
 #writer = common.UnicodeWriter('articles.csv')
 #writer.writerow(['Title', 'Num reads', 'URL'])
 seen_urls = set() # track which articles URL's already seen, to prevent duplicates
-D = download.Download(cache_file='cache')
+D = download.Download(cache_file='cache', num_retries=3)
 
 years = range(2005, 2016)
 root = 'archive/%d-%.2d/'
@@ -41,6 +46,38 @@ def load_list():
 
     with open('articles.json', 'w') as f:
         f.write(json.dumps(articles))
+
+
+_h = HTMLParser.HTMLParser()
+
+def html2text(html):
+    return _h.unescape(html)
+
+
+def lost_image(url):
+    if os.path.exists('lost_images.json'):
+        with open('lost_images.json') as f:
+            try:
+                return url in json.loads(f.read())
+            except ValueError:
+                return False
+    else:
+        return False
+
+def add_lost_image(url):
+    if os.path.exists('lost_images.json'):
+        with open('lost_images.json') as f:
+            try:
+                lost = json.loads(f.read())
+            except ValueError:
+                lost = []
+    else:
+        lost = []
+
+    if url not in lost:
+        lost.append(url)
+        with open('lost_images.json', 'w') as f:
+            f.write(json.dumps(lost))
 
 
 def slugify(value, substitutions=()):
@@ -73,6 +110,7 @@ TMP = u"""\
 
 articles = load_list()
 image_dir = 'images'
+assets = 'http://assets.acr-dijon.org/old/'
 
 
 for article in articles:
@@ -94,31 +132,42 @@ for article in articles:
     month = int(xpath.search(page, '//span[@class="month"]')[0][-2:])
     year = int(xpath.search(page, '//span[@class="year"]')[0][-4:])
     hour = xpath.search(page, '//span[@class="hour"]')[0]
-    date = '%d-%d-%d %s' % (year, month, day, hour)
+    date = '%d-%.2d-%.2d %s' % (year, month, day, hour)
     data['date'] = date
-    name = slugify(date + '-' + data['title']) + '.md'
+    name = slugify(date + '-' + data['title']) + '.rst'
     filename = os.path.join('archives', name)
     if os.path.exists(filename):
         continue
 
-
     # images in the content
     images = xpath.search(page, '//img/@src')
-    images = [image for image in images if image in content]
+    images = [image.strip() for image in images if image in content
+              and image.strip() != '']
+
     for image in images:
-        i_filename = os.path.split(image)[-1]
-        local_name = slugify(date + '-' + i_filename)
-        content = content.replace(image, '/' + local_name)
+        i_path, i_filename = os.path.split(image)
+        i_filename, ext = os.path.splitext(i_filename)
+        local_name = slugify(i_path + '-' + i_filename) + ext
+        content = content.replace(image, assets + local_name)
         disk_name = os.path.join(image_dir, local_name)
+
         if os.path.exists(disk_name):
             continue
+
+        if lost_image(image):
+            print('Image does not exist anymore ' + image)
+            continue
+
+        print('Downloading %s' % image)
         try:
             urllib.urlretrieve(image, filename=disk_name)
         except IOError:
             print('Image does not exist anymore ' + image)
+            add_lost_image(image)
             continue
-        print('Downloading %s' % image)
 
+    content = html2text(content)
+    content = html2rest(content)
     data['content'] = content
     print('Writing %s' % filename)
     page = TMP % data
